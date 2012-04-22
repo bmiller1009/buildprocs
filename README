@@ -1,0 +1,22 @@
+buildprocs
+
+Background
+This is a small shell based application which I wrote in the Summer 2010 semester at Villanova for my UNIX class.
+I initially wrote it to automate some repetitive MySQL tasks and the application essentially grew from there.  Many
+of the operations revolve around getting metadata from MySQL databases and tables.  
+
+Core Functionality
+We all know building CRUD stored procedures for database tables is quite a laborious process.  One of the tasks which
+my application automates is generating stored procedures for a MySQL table.  It will generate stored procedures
+for inserting, updating, deleting and returning data. 
+
+In addtion to code generation, the script will give you a list of all tables in the database along with a row count,
+metadata for a specific table, running SQL commands, and running ssytem commands.
+
+Usage
+Make sure you have mysql installed on the box where this shell script will be run. Then it's simply:
+
+./buildprocs DB_NAME USERNAME PWD
+
+The user is required to provide data for the database name, user name and password.
+
