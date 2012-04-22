@@ -1,0 +1,467 @@
+#!/bin/bash
+
+UNAME=''
+PW=''
+
+ECHO=/bin/echo
+DB=''
+IS_CREATED=''
+PK=''
+COL_TYPE=''
+PROC_EXISTS=''
+PROC_OUTPUT_FILE=''
+PROC_DROP_PROCS=''
+IS_AUTO_INCREMENT=0
+
+if test "$1" = ''
+then	
+	echo "Please provide a database parameter for this script."
+	exit 
+else
+	DB=$1	  
+fi
+
+if test "$2" = ''
+then
+	echo "Please provide a user name parameter for this script."
+	exit
+else
+	UNAME=$2
+fi
+
+if test "$3" = ''
+then
+	echo "Please provide a password parameter for this script."
+	exit
+else
+	PW=$3
+fi
+
+function execute_sql
+{	
+	LOGIN_FORMAT="mysql -u $UNAME -p$PW -e"
+	LOGIN_RAW="mysql -N -r -B -u $UNAME -p$PW -e"
+	
+	SQL=$1		
+	ARGS=$2	
+	
+	if test "$ARGS" = "0"
+	then
+		LOGIN=$LOGIN_FORMAT
+	else	
+		LOGIN=$LOGIN_RAW
+	fi
+
+	$LOGIN "USE $DB;$SQL" 
+}
+
+function get_pk
+{
+	PK=`execute_sql "show index from $1 where Key_name = 'PRIMARY'" 1 | awk '{print $5}'`
+
+	#NOTE -- if PK is not set for the table, we automatically treat the first column in the db as a PK
+	if test "$PK" = ''
+	then
+		PK=`execute_sql "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$1' LIMIT 1" 1`
+	fi
+
+	AI=`execute_sql "SELECT EXTRA FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$1' AND COLUMN_NAME='$PK'" 1`                   
+
+	if test "$AI" = "auto_increment"
+        then
+                IS_AUTO_INCREMENT=1
+        fi
+}
+
+function get_type
+{	
+	COL_TYPE=''
+
+	COL_TYPE=`execute_sql "SELECT column_type FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$1' and column_name = '$2'" 1 | awk '{print $0}'`
+}	
+
+function proc_exists
+{
+	PROC_EXISTS=`execute_sql "select count(1) from information_schema.routines where specific_name = '$1'" 1`
+}
+
+function is_proc_created
+{
+	IS_CREATED=`execute_sql "select count(1) from information_schema.routines where specific_name = '$1'" 1`
+
+	if test "$IS_CREATED" = "1"
+	then
+		echo "Procedure $1 successfully created."
+	fi
+}
+
+function generate_sql_select_all
+{	
+	TABLE=$1
+	
+	PROC=`echo "p_%TABLE%_sel_all" | sed s/%TABLE%/$TABLE/g`
+	
+	echo -e "DROP PROCEDURE $PROC;\n" >> "$PROC_DROP_PROCS"
+
+	SQL=`echo "DELIMITER //; CREATE PROCEDURE $PROC () BEGIN SELECT * FROM %TABLE%; END//" | sed s/%TABLE%/$TABLE/g`
+
+	echo -e "$SQL\n" >> "$PROC_OUTPUT_FILE"	
+	
+	proc_exists "$PROC"
+
+	if test "$PROC_EXISTS" = 1
+        then
+                echo "Procedure $PROC already exists."
+                return
+        fi
+
+	execute_sql "$SQL" "1" 
+
+	is_proc_created "$PROC"
+}
+
+function generate_sql_select_one
+{	
+	get_pk "$1"
+	PK_STRING=''	
+	SETS=''
+	WHERE=''	
+
+	for i in `echo "$PK"`
+	do	
+		get_type "$1" "$i"
+
+		PK_STRING="$PK_STRING p_$i $COL_TYPE,"
+		SETS="$SETS Set @p_$i = p_$i;"  
+		WHERE="$WHERE $i = @p_$i AND "
+	done	
+	
+	WHERE=`echo "$WHERE" | sed 's/AND $//'`
+	PK_STRING=`echo "$PK_STRING" | sed s/,$//`	
+
+	PROC=`echo "p_%TABLE%_sel_id" | sed s/%TABLE%/$1/g`
+
+	SQL=`echo "DELIMITER //; CREATE PROCEDURE p_%TABLE%_sel_id($PK_STRING) BEGIN $SETS SELECT * FROM $1 where $WHERE; END//" | sed s/%TABLE%/$TABLE/g`
+	
+	echo -e "$SQL\n" >> "$PROC_OUTPUT_FILE"
+	echo -e "DROP PROCEDURE $PROC;\n" >> "$PROC_DROP_PROCS"
+
+	proc_exists "$PROC"
+ 
+        if test "$PROC_EXISTS" = 1
+        then
+                echo "Procedure $PROC already exists."
+                return
+        fi
+
+        execute_sql "$SQL" "1"
+        
+        is_proc_created "$PROC"
+}
+
+function generate_sql_del_id
+{
+	get_pk "$1"
+        PK_STRING=''
+        SETS=''
+        WHERE=''
+
+        for i in `echo "$PK"`
+        do
+                get_type "$1" "$i"
+        
+                PK_STRING="$PK_STRING p_$i $COL_TYPE,"  
+                SETS="$SETS Set @p_$i = p_$i;"
+                WHERE="$WHERE $i = @p_$i AND "
+        done
+        
+        WHERE=`echo "$WHERE" | sed 's/AND $//'`
+        PK_STRING=`echo "$PK_STRING" | sed s/,$//`	
+
+	PROC=`echo "p_%TABLE%_del_id" | sed s/%TABLE%/$1/g`
+
+        SQL=`echo "DELIMITER //; CREATE PROCEDURE p_%TABLE%_del_id($PK_STRING) BEGIN $SETS DELETE FROM $1 where $WHERE; END//" | sed s/%TABLE%/$TABLE/g`
+	
+	echo -e "$SQL\n" >> "$PROC_OUTPUT_FILE"
+	echo -e "DROP PROCEDURE $PROC;\n" >> "$PROC_DROP_PROCS"
+
+	proc_exists "$PROC"
+        
+        if test "$PROC_EXISTS" = 1
+        then
+                echo "Procedure $PROC already exists."
+                return
+        fi
+
+        execute_sql "$SQL" "1"
+ 	
+        is_proc_created "$PROC"
+}
+
+function generate_sql_insert
+{	
+	PROC=`echo "p_%TABLE%_ins" | sed s/%TABLE%/$1/g`
+
+	get_pk $1
+	
+	PK_STRING=''
+        SETS=''
+        WHERE=''
+	PKS=''	
+
+        for i in `echo "$PK"`
+        do
+                get_type "$1" "$i"
+        
+                PK_STRING="$PK_STRING SELECT MAX($i) INTO p_$i FROM $1;"
+                SETS="$SETS Set @p_$i = p_$i;"
+                WHERE="$WHERE $i = @p_$i AND "
+		PKS="$PKS $i "
+        done
+	
+        WHERE=`echo "$WHERE" | sed 's/AND $//'`
+        #PK_STRING=`echo "$PK_STRING" | sed s/,$//`
+
+	cols=''	
+	cols_no_types=''
+	sets=''	
+	params=''	
+	
+	for i in `execute_sql "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$1' AND COLUMN_TYPE NOT IN ('timestamp');" 1 | awk '{print $4}'`
+	do	
+		get_type "$1" "$i"				
+		
+		IS_PK=`echo $PKS | grep "$i"`
+
+		if test "$IS_PK" = ''
+		then
+			cols="$cols $i $COL_TYPE,"
+			cols_no_types="$cols_no_types $i," 
+       			sets="$sets SET @$i = $i;" 
+			params="$params @$i,"
+		else
+			if test "$IS_AUTO_INCREMENT" = 0 
+			then	
+				cols="$cols OUT p_$i $COL_TYPE, $i $COL_TYPE,"
+				cols_no_types="$cols_no_types $i,"
+				sets="$sets SET @$i = $i;"
+				params="$params @$i,"
+			else
+				cols="$cols OUT p_$i $COL_TYPE,"
+			fi
+		fi
+	done	
+
+	cols=`echo $cols | sed s/,$//`
+	cols_no_types=`echo $cols_no_types | sed s/,$//` 	
+	params=`echo $params | sed s/,$//`	
+
+	SQL=`echo "DELIMITER //; CREATE PROCEDURE p_%TABLE%_ins ($cols) BEGIN $sets INSERT INTO $1 ($cols_no_types) VALUES ($params); $PK_STRING END//" | 
+sed s/%TABLE%/$1/g`
+
+	echo -e "$SQL\n" >> "$PROC_OUTPUT_FILE"
+	echo -e "DROP PROCEDURE $PROC;\n" >> "$PROC_DROP_PROCS"	
+	
+	proc_exists "$PROC"
+ 
+        if test "$PROC_EXISTS" = 1
+        then
+                echo "Procedure $PROC already exists."
+                return
+        fi
+
+	execute_sql "$SQL" "1"
+        
+        is_proc_created "$PROC"	
+}
+
+function generate_sql_update
+{
+	PROC=`echo "p_%TABLE%_upd" | sed s/%TABLE%/$1/g`
+ 
+        proc_exists "$PROC"                             
+
+	get_pk $1
+
+	PK_STRING=''
+        SETS=''
+        WHERE=''
+	PKS=''
+
+        for i in `echo "$PK"`
+        do
+                get_type "$1" "$i"
+        
+                PK_STRING="$PK_STRING p_$i $COL_TYPE,"
+                SETS="$SETS Set @p_$i = p_$i;"
+                WHERE="$WHERE $i = @p_$i AND "
+		PKS="$PKS $i"
+        done    
+
+        WHERE=`echo "$WHERE" | sed 's/AND $//'`
+        PK_STRING=`echo "$PK_STRING" | sed s/,$//`	
+	
+        cols=''
+        cols_no_types=''
+        col_params=''
+        
+        for i in `execute_sql "SELECT * FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '$1' AND COLUMN_TYPE NOT IN ('timestamp');" 1 | awk '{print $4}'`
+        do
+                get_type "$1" "$i"
+        	
+		IS_PK=`echo "$i" | grep "^$PKS$"`
+		
+                cols="$cols p_$i $COL_TYPE,"
+		
+		if test "$IS_PK" = ''
+		then
+			col_params="$col_params $i = p_$i,"
+		fi
+        done
+ 
+        cols=`echo $cols | sed s/,$//`
+        col_params=`echo $col_params | sed s/,$//`
+   
+        SQL=`echo "DELIMITER //; CREATE PROCEDURE p_%TABLE%_upd ($cols) BEGIN $SETS UPDATE $1 SET $col_params WHERE $WHERE; END//" | sed s/%TABLE%/$1/g`
+
+	echo -e "$SQL\n" >> "$PROC_OUTPUT_FILE"
+	echo -e "DROP PROCEDURE $PROC;\n" >> "$PROC_DROP_PROCS"	
+
+	proc_exists "$PROC"
+        
+        if test "$PROC_EXISTS" = 1
+        then
+                echo "Procedure $PROC already exists."
+                return
+        fi
+
+        execute_sql "$SQL" "1"
+
+        is_proc_created "$PROC"
+}
+
+clear
+
+while :
+do
+   $ECHO -e  "Welcome ${THISUSER} to the MySQL Stored Procedure Generator \n"
+   $ECHO -e  "Please choose from the options below"
+   cat  << END-OF-DATA
+
+                1)  Get list of tables for database $1
+
+                2)  View metadata for a specific table
+
+                3)  Generate Stored Procedures
+
+		4)  Run SQL Command
+		
+		5)  Run System Command
+		
+		q)  Quit
+ 
+Enter your choice:
+
+END-OF-DATA
+
+  read INPUT
+
+  case $INPUT in
+     
+     1) CMD="Show tables" 
+	TABLE_COUNT=`execute_sql "$CMD" 1 | wc -l`
+	echo
+	echo "$TABLE_COUNT table(s) found:"
+	echo ----------
+	for i in `execute_sql "$CMD" 1`
+	do	
+		ROW_COUNT=`execute_sql "SELECT COUNT(1) FROM $i" 1`
+		echo "$i ($ROW_COUNT rows)"
+	done 
+	echo ----------
+	
+	$ECHO  Press enter to continue
+
+	read junk; clear ;;
+	
+     2) $ECHO Enter in the name of the table
+        read TABLE_NAME
+	FOUND=0;
+        for t in `execute_sql "SHOW TABLES" 1`
+	do
+		if test "$t" = "$TABLE_NAME"
+		then
+			FOUND=1	
+		fi
+	done		 
+	
+	echo
+
+	if test "$FOUND" = 1 
+	then	
+		execute_sql "SHOW COLUMNS FROM $TABLE_NAME" 0
+	else
+
+		echo "Table '$TABLE_NAME' is not in the database $DB."
+	fi
+	
+	echo
+
+	$ECHO  Press enter to continue
+
+	read junk; clear	;;
+	
+     3) $ECHO Enter in the name of the table
+	read TABLE_NAME
+	
+	FOUND=0;
+        for t in `execute_sql "SELECT * FROM INFORMATION_SCHEMA.TABLES where table_schema = '$DB' and table_type = 'BASE TABLE'" 1`
+        do
+                if test "$t" = "$TABLE_NAME"
+                then
+                        FOUND=1
+               	 fi
+        done
+
+        if test "$FOUND" = 1
+        then	
+		PROC_OUTPUT_FILE=`echo "%TABLE%_proc.sql" | sed s/%TABLE%/$TABLE_NAME/`
+		PROC_DROP_PROCS=`echo "%TABLE%_drop_procs.sql" | sed s/%TABLE%/$TABLE_NAME/`		
+		echo -e "/*$TABLE_NAME procedure file*/" > "$PROC_OUTPUT_FILE"   
+		echo -e "/*$TABLE_NAME drop procedures file*/" > "$PROC_DROP_PROCS"
+		generate_sql_select_all $TABLE_NAME
+		generate_sql_select_one $TABLE_NAME
+		generate_sql_del_id $TABLE_NAME
+		generate_sql_insert $TABLE_NAME
+		generate_sql_update $TABLE_NAME
+
+		echo "Please see $PROC_OUTPUT_FILE and $PROC_DROP_PROCS in directory `pwd`"
+	else
+
+                echo "Table '$TABLE_NAME' is not in the database $DB."
+	fi
+	
+	$ECHO  Press enter to continue
+
+	read junk; clear	;;
+
+     4) $ECHO Enter the SQL statement you would like to execute.                                                                                        
+        read SQL_CMD
+          
+        execute_sql "$SQL_CMD" 0
+
+	$ECHO  Press enter to continue
+
+        read junk; clear	     ;;
+	
+     5) $ECHO Enter in the command:
+        read COMMAND
+        $ECHO `$COMMAND`
+        $ECHO  Press enter to continue
+        read junk; clear             ;;
+
+     *) exit;;
+
+esac
+
+done
